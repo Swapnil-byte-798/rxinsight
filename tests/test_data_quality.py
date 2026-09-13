@@ -48,6 +48,7 @@ def test_every_staged_row_is_loaded_or_rejected(conn, loaded):
     ("fact_sales_calls", "dim_hcp", "hcp_key"),
     ("fact_sales_calls", "dim_product", "product_key"),
     ("fact_sales_calls", "dim_date", "date_key"),
+    ("fact_sales_calls", "dim_territory", "territory_key"),
 ])
 def test_no_orphan_foreign_keys(conn, loaded, fact, dim, key):
     orphans = scalar(conn, f"""

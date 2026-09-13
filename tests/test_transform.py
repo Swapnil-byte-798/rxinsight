@@ -166,3 +166,51 @@ def test_resolve_never_loses_a_row(dims):
     ])
     resolved, rejects = resolve_surrogate_keys(facts, dim_hcp, dim_product, dim_date)
     assert len(resolved) + len(rejects) == len(facts)
+
+
+# --------------------------------------------------------------------------
+# Regression: rejects must be selected positionally, not by index label
+# --------------------------------------------------------------------------
+def test_rejects_survive_a_gapped_index(dims):
+    """The rejected rows must be the ones that are actually bad.
+
+    Regression test for a real bug. `resolve_surrogate_keys` tracks input rows by
+    position, but originally selected them back out with `.loc`, which is
+    label-based. In the pipeline this function is fed the output of
+    `coerce_columns`, whose index already has gaps where type-rejects were
+    dropped — so every label past the first gap resolved to the WRONG row. Clean
+    rows were quarantined and the genuinely malformed ones were loaded.
+
+    The row counts reconciled either way, so the count-based assertions all
+    passed while the quarantine file was wrong. This test checks identity, not
+    counts, which is the only thing that catches it.
+    """
+    dim_hcp, dim_product, dim_date = dims
+
+    facts = pd.DataFrame([
+        {"rx_date": "2024-03-01", "hcp_id": "HCP-1",  "product_code": "RX-1", "trx_count": 1},
+        {"rx_date": "2024-03-02", "hcp_id": "HCP-1",  "product_code": "RX-1", "trx_count": 2},
+        {"rx_date": "2024-03-03", "hcp_id": "HCP-1",  "product_code": "RX-1", "trx_count": 3},
+        {"rx_date": "2024-03-04", "hcp_id": "HCP-1",  "product_code": "BAD",  "trx_count": 4},
+        {"rx_date": "2024-03-05", "hcp_id": "GHOST",  "product_code": "RX-1", "trx_count": 5},
+    ])
+    # Punch a gap in the index exactly as coerce_columns does when it drops a
+    # type-reject: labels 0,1,3,4 with position 2 missing.
+    gapped = facts.drop(index=2)
+    assert list(gapped.index) != list(range(len(gapped))), "fixture must have a gapped index"
+
+    resolved, rejects = resolve_surrogate_keys(gapped, dim_hcp, dim_product, dim_date)
+
+    # gapped holds labels 0, 1, 3, 4 — two good rows and the two bad ones.
+    assert len(resolved) + len(rejects) == len(gapped) == 4
+    assert len(resolved) == 2 and len(rejects) == 2
+
+    # Identity, not counts. The counts reconciled even with the bug present.
+    by_reason = dict(zip(rejects["reject_reason"], rejects["product_code"]))
+    assert by_reason["unknown product_code"] == "BAD", \
+        "a clean row was quarantined instead of the malformed one"
+    by_hcp = dict(zip(rejects["reject_reason"], rejects["hcp_id"]))
+    assert by_hcp["unknown hcp_id"] == "GHOST"
+
+    # every surviving row is one of the two genuinely clean ones
+    assert sorted(resolved["date_key"].tolist()) == [20240301, 20240302]

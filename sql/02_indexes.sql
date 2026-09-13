@@ -73,16 +73,23 @@ COMMENT ON INDEX warehouse.idx_rx_date_product IS
 -- here would duplicate what idx_rx_date_product already covers for period filters
 -- while making this index bigger for the lookups it actually serves.
 --
--- Second job: this index also backs the foreign key to dim_hcp. Postgres indexes
--- the referenced side automatically but never the referencing side, so without it
--- every update or delete on dim_hcp — which SCD2 does on each load when it closes
--- a row — would sequentially scan 2M fact rows to check the constraint.
+-- Second job, stated precisely: this index also backs the foreign key to dim_hcp.
+-- Postgres indexes the referenced side automatically but never the referencing
+-- side, so DELETEing a dim_hcp row — or changing an hcp_key — has to find the
+-- children, which is a full scan of the fact table without this index. Note what
+-- that does NOT cover: this pipeline is full-refresh and rebuilds dim_hcp by COPY,
+-- so it issues no such DELETE, and SCD2 closes rows inside a pandas frame rather
+-- than with SQL. Even an in-place close would not fire the check, because a
+-- referential-integrity check only runs when the referenced key columns change and
+-- closing a row touches valid_to and is_current, not hcp_key. The drill-down
+-- workload above is what justifies this index today; the FK support is insurance
+-- for a future incremental loader.
 -- ---------------------------------------------------------------------------
 CREATE INDEX IF NOT EXISTS idx_rx_hcp
     ON warehouse.fact_prescriptions (hcp_key);
 
 COMMENT ON INDEX warehouse.idx_rx_hcp IS
-    'Per-prescriber lookups/aggregation (hcp_decile_ranking) and FK-check support for SCD2 updates on dim_hcp.';
+    'Per-prescriber lookups/aggregation (hcp_decile_ranking); also backs the FK to dim_hcp for dimension deletes/key changes.';
 
 -- ---------------------------------------------------------------------------
 -- 3. Territory access path.
@@ -93,13 +100,15 @@ COMMENT ON INDEX warehouse.idx_rx_hcp IS
 -- territory_key leads (it is the only column in the index) because territory is
 -- the equality/grouping predicate: 50 territories over 2M rows means one
 -- territory's drill-down reads ~2% of the table — well inside the range where an
--- index scan beats a sequential scan. It likewise backs the FK to dim_territory.
+-- index scan beats a sequential scan. It likewise backs the FK to dim_territory,
+-- with the same caveat as above: nothing in this pipeline deletes a territory or
+-- rewrites a territory_key, so that is latent value, not a measured saving.
 -- ---------------------------------------------------------------------------
 CREATE INDEX IF NOT EXISTS idx_rx_territory
     ON warehouse.fact_prescriptions (territory_key);
 
 COMMENT ON INDEX warehouse.idx_rx_territory IS
-    'Per-territory rollups (territory_attainment) and FK-check support for dim_territory.';
+    'Per-territory rollups (territory_attainment); also backs the FK to dim_territory.';
 
 -- ---------------------------------------------------------------------------
 -- 4. Call-to-prescription matching.

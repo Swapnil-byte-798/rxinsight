@@ -2,8 +2,8 @@
 
 Every function here takes DataFrames and returns DataFrames. None of them open a
 database connection, read a file, or look at the clock. That is deliberate: it
-means the SCD Type 2 logic and the key-resolution logic can be tested against
-five hand-written rows in milliseconds, with no Postgres anywhere near the test.
+means the SCD Type 2 logic and the key-resolution logic can be tested against a
+handful of hand-written rows in milliseconds, with no Postgres near the test.
 
 The two rules the whole module is built around:
 
@@ -17,6 +17,7 @@ The two rules the whole module is built around:
 """
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 OPEN_ENDED = pd.Timestamp("9999-12-31")
@@ -206,12 +207,21 @@ def resolve_surrogate_keys(facts: pd.DataFrame,
 
     unresolved = work["product_key"].isna() | work["hcp_key"].isna() | ~date_ok
 
-    rejects = facts.loc[work.loc[unresolved, "_row"].to_numpy()].copy()
-    reason = pd.Series("unresolved natural key", index=rejects.index)
-    reason[work.loc[unresolved, "product_key"].isna().to_numpy()] = "unknown product_code"
-    reason[work.loc[unresolved, "hcp_key"].isna().to_numpy()] = "unknown hcp_id"
-    reason[(~date_ok).loc[unresolved].to_numpy()] = "date outside dim_date"
-    rejects["reject_reason"] = reason.to_numpy()
+    # `_row` holds POSITIONS into `facts`, so select positionally with .iloc.
+    #
+    # This was a real bug: .loc is label-based, and by the time the pipeline calls
+    # this function coerce_columns has already dropped the type-reject rows, so the
+    # index has gaps and label != position. Every label past the first gap resolved
+    # to the wrong row — clean rows were quarantined while the genuinely malformed
+    # ones were loaded. The row COUNTS still reconciled, which is exactly why the
+    # reconciliation assertion did not catch it. test_rejects_survive_a_gapped_index
+    # pins the behaviour.
+    unres = work.loc[unresolved]
+    rejects = facts.iloc[unres["_row"].to_numpy()].copy()
+    rejects["reject_reason"] = np.select(
+        [unres["product_key"].isna().to_numpy(), unres["hcp_key"].isna().to_numpy()],
+        ["unknown product_code", "unknown hcp_id"],
+        default="date outside dim_date")
 
     resolved = work[~unresolved].copy()
     for col in ("hcp_key", "product_key", "territory_key"):

@@ -42,7 +42,7 @@ WITH monthly AS (
 ),
 shared AS (
     SELECT year_month, brand_name, trx,
-           ROUND(100.0 * trx / SUM(trx) OVER (PARTITION BY year_month), 2) AS share_pct
+           ROUND(100.0 * trx / NULLIF(SUM(trx) OVER (PARTITION BY year_month), 0), 2) AS share_pct
     FROM monthly
 )
 SELECT year_month, brand_name, trx, share_pct,

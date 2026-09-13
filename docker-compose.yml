@@ -1,0 +1,23 @@
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: rxinsight-db
+    environment:
+      POSTGRES_USER: rxinsight
+      POSTGRES_PASSWORD: rxinsight
+      POSTGRES_DB: rxinsight
+    ports:
+      # 5544 on the host: 5432 and 5433 are commonly already taken by other
+      # local Postgres instances, and a port clash is the most boring possible
+      # reason for a demo to fail.
+      - "5544:5432"
+    volumes:
+      - rxinsight_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rxinsight -d rxinsight"]
+      interval: 3s
+      timeout: 5s
+      retries: 20
+
+volumes:
+  rxinsight_pgdata:

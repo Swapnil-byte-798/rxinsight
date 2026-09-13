@@ -1,7 +1,11 @@
+# generated source extracts and reject files
 data/*.csv
+data/rejects/
 !data/.gitkeep
+
 __pycache__/
 *.py[cod]
 .venv/
 .env
 .pytest_cache/
+.DS_Store

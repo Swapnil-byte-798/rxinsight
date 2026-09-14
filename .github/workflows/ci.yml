@@ -1,0 +1,77 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: rxinsight
+          POSTGRES_PASSWORD: rxinsight
+          POSTGRES_DB: rxinsight
+        ports:
+          - 5544:5432
+        options: >-
+          --health-cmd "pg_isready -U rxinsight -d rxinsight"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://rxinsight:rxinsight@localhost:5544/rxinsight
+      # A real end-to-end run, at a scale that fits a CI minute. The pipeline is
+      # identical; only the row count differs. The indexing measurement needs the
+      # full 2M rows to mean anything, so it is not part of CI.
+      RXINSIGHT_RX_ROWS: "200000"
+      RXINSIGHT_HCPS: "500"
+      RXINSIGHT_MONTHS: "12"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Unit tests (no database)
+        run: pytest tests/test_transform.py -q
+
+      - name: Run the pipeline end to end
+        run: python -m etl.pipeline
+
+      - name: Full suite, including data-quality assertions
+        run: pytest tests -q
+
+      - name: Every quarantined row must genuinely be malformed
+        run: |
+          python - <<'PY'
+          import pandas as pd, sys
+          from etl import config as C
+          r = pd.read_csv(C.REJECTS_DIR / "prescriptions_rejects.csv",
+                          keep_default_na=False, na_values=[])
+          sub = r[r["reject_reason"] == "unknown product_code"]
+          bad = r[r["reject_reason"] == "non-numeric value in trx_count"]
+          ok  = (sub["product_code"] == "UNKNOWN-99").sum()
+          nn  = (bad["trx_count"] == "N/A").sum()
+          print(f"unknown product_code: {ok}/{len(sub)} genuinely bad")
+          print(f"non-numeric trx     : {nn}/{len(bad)} genuinely bad")
+          # Regression guard for the label-vs-position bug: counts reconciled even
+          # when the WRONG rows were being quarantined, so assert identity.
+          if ok != len(sub) or nn != len(bad):
+              sys.exit("rejects contain rows that are not actually malformed")
+          PY

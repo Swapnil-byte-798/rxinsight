@@ -1,5 +1,7 @@
 # RxInsight
 
+[![tests](https://github.com/Swapnil-byte-798/rxinsight/actions/workflows/ci.yml/badge.svg)](https://github.com/Swapnil-byte-798/rxinsight/actions/workflows/ci.yml)
+
 **A pharmaceutical commercial analytics warehouse.** PostgreSQL star schema, Python ETL
 with Slowly Changing Dimensions, and window-function SQL over ~2.2 million prescription
 rows.
@@ -274,6 +276,13 @@ logic is written as pure functions over DataFrames:
 * every fact resolves to the *temporally correct* HCP version
 
 They skip cleanly rather than failing when Postgres is not running.
+
+CI runs the **whole pipeline**, not just the unit tests: every push spins up Postgres,
+generates extracts, loads them end to end and runs all 36 assertions, then checks that every
+quarantined row is genuinely malformed — the regression guard for the bug below. It runs at a
+reduced scale (200k rows, set by `RXINSIGHT_RX_ROWS`) so it fits a CI minute; the pipeline
+code path is identical. The indexing measurement needs the full 2M rows to mean anything, so
+it is not part of CI.
 
 ### A bug the tests did not catch
 

@@ -29,11 +29,15 @@ DATABASE_URL = os.environ.get(
 # sequentially scan anything that fits comfortably in cache no matter what
 # indexes exist. ~2M prescription rows is the smallest size where the composite
 # index visibly changes the plan.
-N_HCPS = 2_000
+N_HCPS = int(os.environ.get("RXINSIGHT_HCPS", 2_000))
 N_TERRITORIES = 50
-N_MONTHS = 24
+N_MONTHS = int(os.environ.get("RXINSIGHT_MONTHS", 24))
 START_DATE = "2024-01-01"
-TARGET_RX_ROWS = 2_000_000
+
+# Overridable so CI can run the real pipeline end to end at a smaller scale. The
+# default is the size at which the indexing measurement is meaningful; CI cares
+# that every stage works, not that the numbers reproduce.
+TARGET_RX_ROWS = int(os.environ.get("RXINSIGHT_RX_ROWS", 2_000_000))
 
 RANDOM_SEED = 42
 

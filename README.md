@@ -159,9 +159,31 @@ with _engine().connect().execution_options(stream_results=True, max_row_buffer=c
 psycopg2 buffer the entire result set client-side before handing out the first batch — you
 get the iteration API and none of the memory benefit.
 
-Measured peak resident memory for the full 2.2M-row load: **442 MB**, and it is a property
-of `CHUNK_ROWS` rather than of the table. The earlier whole-table version held every row in
-one frame, and on a machine low on memory it paged rather than progressed.
+Because `CHUNK_ROWS` is read from the environment, the batching can be A/B tested without
+editing anything: set it above the row count and the pipeline processes the table in a single
+batch, which is the old whole-table behaviour through the same code path.
+
+Run back to back on the same machine against the same 2.2M rows:
+
+| `RXINSIGHT_CHUNK_ROWS` | Peak resident memory |
+|---|---|
+| `250000` (batched) | **266 MB** |
+| `5000000` (one batch) | **901 MB** |
+
+**3.4x less memory for the same work**, and the batched figure is set by the batch size
+rather than the table — 20 million rows would still peak around 266 MB, where the one-batch
+version would need roughly ten times what it does here.
+
+A separate earlier batched run peaked at 442 MB. Sampled peak memory moves around with what
+else the machine is doing, so read these as "a few hundred megabytes, bounded" rather than a
+constant; the 3.4x ratio is the reliable part, because both halves were measured minutes
+apart under the same load.
+
+*No throughput comparison is published here.* Both halves of that A/B were aborted at a
+50-minute cap on a machine that was heavily contended at the time, so neither produced a
+usable timing. On GitHub's runners the full CI pipeline completes in about a minute at 200k
+rows. Timing this properly needs an idle machine, and an unreproducible number is worse than
+an absent one.
 
 Building `dim_date` used to mean reading both fact extracts into pandas purely to take a min
 and a max; it is now a `SELECT min(...), max(...)` in the database.

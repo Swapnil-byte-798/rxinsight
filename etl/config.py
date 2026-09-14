@@ -46,7 +46,7 @@ RANDOM_SEED = 42
 # property of this constant rather than of the table size. 2.2M rows in one frame
 # needs gigabytes once pandas copies it a few times; at 250k it is comfortable on
 # a laptop.
-CHUNK_ROWS = 250_000
+CHUNK_ROWS = int(os.environ.get("RXINSIGHT_CHUNK_ROWS", 250_000))
 
 # Fraction of HCPs who change decile or territory mid-period. These are the
 # rows that exercise SCD Type 2 — without them the dimension is just a lookup.

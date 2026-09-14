@@ -76,8 +76,12 @@ file I/O, no clock. It casts the TEXT columns, folds new HCP versions into the T
 dimension, and swaps natural keys for surrogate keys, returning *(clean, rejects)* rather
 than raising on bad data.
 
-**Load and analyse.** `etl/pipeline.py` `COPY`s the resolved frames into the fact tables with
-foreign keys temporarily suspended, then reconciles: staged must equal loaded plus rejected,
+**Load and analyse.** The fact path runs in batches rather than all at once: staging is read
+250,000 rows at a time through a server-side cursor, and each batch is typed, key-resolved,
+`COPY`ed and released before the next is fetched, so peak memory is set by the batch size
+rather than by the table (442 MB measured across the full 2.2M-row load). `etl/pipeline.py`
+does this with foreign keys temporarily suspended, then reconciles: staged must equal loaded
+plus rejected,
 or the run fails. Four `psql`-runnable SQL files in `sql/analytics/` then read the star
 schema directly, with no application code in between.
 
@@ -435,9 +439,11 @@ At 200 million rows the shape of the problem changes:
 - **Partition `fact_prescriptions` by month.** At 2.2M rows a parallel sequential scan is
   fine; at 200M the brand-share aggregate needs partition pruning — the real fix in precisely
   the place where an index measurably was not.
-- **Key resolution moves out of pandas.** Holding the fact frame in memory to merge against
-  dimensions works at two million rows and not at two hundred million; the temporal join
-  becomes an `INSERT ... SELECT` range-joined to `dim_hcp` inside the database.
+- **Key resolution moves out of pandas.** The fact path already streams — staging is read in
+  250,000-row batches through a server-side cursor, so peak memory is bounded (442 MB measured
+  for the full load) and set by the batch size rather than the table. But each batch still
+  merges against the dimensions in pandas, and at two hundred million rows the temporal join
+  belongs in the database as an `INSERT ... SELECT` range-joined to `dim_hcp`.
 - **Incremental loads become mandatory** — a watermark on `date_key` plus an upsert, and a
   backfill path for late-arriving facts, which does not exist today.
 - **Constraint suspension stops being enough.** Per-partition loads, `ATTACH PARTITION` after

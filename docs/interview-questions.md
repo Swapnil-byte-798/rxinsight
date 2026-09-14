@@ -358,10 +358,17 @@ pharma feeds get restated.
 
 ### Q: What is the memory behaviour of your pipeline?
 
-**A:** It is the honest weak point — the full prescription frame is in memory at once, fine at 2.2
-million rows on a laptop but not linearly scalable. The chunking in `copy_dataframe` bounds the
-serialisation buffer, not the frame itself. The real fix is date-bounded chunks end to end, or
-pushing the transform into SQL against staging.
+**A:** Bounded, and it was not always. The first version pulled the whole prescription table into
+one pandas frame, which was fine on an idle laptop and paged badly on a busy one — I watched it sit
+at zero percent CPU thrashing rather than progressing. Now the fact path streams: staging is read in
+batches of 250,000 rows through a server-side cursor, and each batch is typed, key-resolved, COPYed
+and released before the next arrives. Measured peak resident memory for the full 2.2 million row
+load is 442 MB, and it is a property of the batch size rather than the table size.
+
+*Follow-up they may ask:* Why not just use `chunksize`? Because on its own it does not help —
+psycopg2 still buffers the whole result set client-side before yielding the first batch. You need
+`stream_results=True` so SQLAlchemy opens a named cursor on the server. Worth knowing that the
+obvious-looking parameter is the half that does nothing.
 
 ## 7. Testing and data quality
 

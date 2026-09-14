@@ -99,7 +99,7 @@ def main() -> dict:
             verdict = (f"{r['ratio']:.0f}x faster" if r["ratio"] >= 1.15 else
                        f"{1/r['ratio']:.1f}x SLOWER" if r["ratio"] <= 0.87 else "no change")
             print(f"  {label:<22}{r['before_ms']:>10.1f}ms{r['after_ms']:>10.1f}ms"
-                  f"{verdict:>11}   {r['after_plan']}")
+                  f"{verdict:>13}   {r['after_plan']}")
         print()
         print("  Read that second row honestly: the composite index does not help an")
         print("  aggregate with no selective predicate, and can lose to a parallel seq")

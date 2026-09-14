@@ -37,6 +37,13 @@ TARGET_RX_ROWS = 2_000_000
 
 RANDOM_SEED = 42
 
+# Rows pulled from staging per batch when building the facts. The pipeline never
+# holds more than one batch of prescription rows in memory, so peak RSS is a
+# property of this constant rather than of the table size. 2.2M rows in one frame
+# needs gigabytes once pandas copies it a few times; at 250k it is comfortable on
+# a laptop.
+CHUNK_ROWS = 250_000
+
 # Fraction of HCPs who change decile or territory mid-period. These are the
 # rows that exercise SCD Type 2 — without them the dimension is just a lookup.
 SCD_CHANGE_RATE = 0.02

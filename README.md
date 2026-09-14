@@ -139,7 +139,34 @@ with constraints_suspended(conn, fact_tables):
 The guarantee is unchanged, not weakened: the constraints are restored inside the same
 transaction, so a violating row fails the `ADD CONSTRAINT` and rolls the whole load back.
 
-Full pipeline, end to end: **150–246 s**.
+Full pipeline, end to end: **150–246 s** on an idle machine.
+
+### Bounded memory
+
+The fact path streams. `etl/pipeline.py` pulls staging in batches of `CHUNK_ROWS`
+(250,000) through a **server-side cursor**, and each batch is typed, key-resolved, `COPY`-ed
+and released before the next is fetched:
+
+```python
+with _engine().connect().execution_options(stream_results=True, max_row_buffer=chunk) as c:
+    for frame in pd.read_sql(text(f"SELECT * FROM {table}"), c, chunksize=chunk):
+        yield frame
+```
+
+`stream_results=True` is the part that matters. Without it, `chunksize` alone still makes
+psycopg2 buffer the entire result set client-side before handing out the first batch — you
+get the iteration API and none of the memory benefit.
+
+Measured peak resident memory for the full 2.2M-row load: **442 MB**, and it is a property
+of `CHUNK_ROWS` rather than of the table. The earlier whole-table version held every row in
+one frame, and on a machine low on memory it paged rather than progressed.
+
+Building `dim_date` used to mean reading both fact extracts into pandas purely to take a min
+and a max; it is now a `SELECT min(...), max(...)` in the database.
+
+One dependency worth noting: batching is only correct because rejects are selected by
+position (see the bug below). With the original label-based lookup, every batch after the
+first would have quarantined the wrong rows.
 
 Both ranges are cold-run to warm-run across repeated executions on a 4-core laptop; the
 low end is a re-run against a warm Postgres buffer cache. The comparison that matters is
@@ -171,6 +198,13 @@ parallelism. That plan shape is real and reproducible. The timing was not: re-me
 warm cache it did not hold up, and there is no case in `etl/measure.py` behind it. Rather
 than publish a figure this repo cannot reproduce, the number is omitted — `make tune` times
 the two queries in the table above, and every measurement quoted here comes from it.
+
+Re-measured later on a heavily loaded machine, the absolute numbers move a long way —
+2119.4 ms to 6.5 ms for the drill-down, 31264.5 ms to 23743.4 ms for the aggregate — but the
+conclusion does not move at all. The selective query's plan still flips to a Bitmap Heap
+Scan; the aggregate still stays a Parallel Seq Scan. Treat the ratio as an order of
+magnitude rather than a constant: it is a property of the machine's state as much as of the
+index.
 
 > An index earns its keep on **selectivity**, not on table size.
 

@@ -16,7 +16,7 @@ import sys
 import time
 
 import pandas as pd
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 
 from etl import config as C
 from etl import load_staging as ls
@@ -45,7 +45,42 @@ def _engine():
 
 
 def _read_staging(conn, table: str) -> pd.DataFrame:
+    """Load a whole staging table. Only safe for the small ones (stg_hcp)."""
     return pd.read_sql(f"SELECT * FROM {table}", _engine())
+
+
+def _iter_staging(table: str, chunk_rows: int = None):
+    """Yield a staging table in batches, streamed from the server.
+
+    `stream_results=True` makes psycopg2 open a named (server-side) cursor, so
+    rows arrive in batches instead of the driver buffering the entire result set
+    client-side first — without it, chunksize alone would still pull all 2.2M
+    rows into memory before handing out the first batch.
+    """
+    chunk_rows = chunk_rows or C.CHUNK_ROWS
+    with _engine().connect().execution_options(
+            stream_results=True, max_row_buffer=chunk_rows) as c:
+        for frame in pd.read_sql(text(f"SELECT * FROM {table}"), c, chunksize=chunk_rows):
+            yield frame
+
+
+def _date_bounds(conn):
+    """Min and max fact date, computed in the database.
+
+    Building dim_date used to mean pulling both fact staging tables into pandas
+    purely to take a min and a max — millions of rows read to produce two values.
+    """
+    with conn.cursor() as cur:
+        cur.execute(r"""
+            SELECT min(d), max(d) FROM (
+                SELECT rx_date::date   AS d FROM staging.stg_prescriptions
+                 WHERE rx_date   ~ '^\d{4}-\d{2}-\d{2}$'
+                UNION ALL
+                SELECT call_date::date     FROM staging.stg_sales_calls
+                 WHERE call_date ~ '^\d{4}-\d{2}-\d{2}$'
+            ) x
+        """)
+        return cur.fetchone()
 
 
 def _fetch(conn, sql: str) -> pd.DataFrame:
@@ -77,9 +112,9 @@ def run(skip_schema: bool = False, skip_generate: bool = False) -> dict:
 
         # ---------------- dimensions ----------------
         print("→ building dimensions")
+        # Only the HCP master is small enough to hold whole (a couple of thousand
+        # rows). The two fact extracts are streamed in batches further down.
         stg_hcp = _read_staging(conn, "staging.stg_hcp")
-        stg_rx = _read_staging(conn, "staging.stg_prescriptions")
-        stg_calls = _read_staging(conn, "staging.stg_sales_calls")
 
         products = pd.DataFrame(C.PRODUCTS, columns=[
             "product_code", "brand_name", "molecule", "therapeutic_area", "is_competitor"])
@@ -92,11 +127,8 @@ def run(skip_schema: bool = False, skip_generate: bool = False) -> dict:
         terr["country"] = "India"
         ls.copy_dataframe(conn, terr, "warehouse.dim_territory", list(terr.columns))
 
-        all_dates = pd.concat([
-            pd.to_datetime(stg_rx["rx_date"], errors="coerce"),
-            pd.to_datetime(stg_calls["call_date"], errors="coerce"),
-        ]).dropna()
-        dim_date = T.build_dim_date(all_dates.min(), all_dates.max())
+        lo, hi = _date_bounds(conn)
+        dim_date = T.build_dim_date(lo, hi)
         ls.copy_dataframe(conn, dim_date, "warehouse.dim_date", list(dim_date.columns))
         conn.commit()
 
@@ -135,47 +167,69 @@ def run(skip_schema: bool = False, skip_generate: bool = False) -> dict:
         stats["dim_hcp_rows"] = len(dim_hcp)
         stats["scd2_history_rows"] = int((versions["is_current"] == False).sum())  # noqa: E712
 
-        # ---------------- facts ----------------
-        print("→ resolving surrogate keys and loading facts")
-        rx_clean, rx_type_rejects = T.coerce_columns(
-            stg_rx, integer=["trx_count", "nrx_count"],
-            numeric=["units", "gross_sales"], dates=["rx_date"])
-        rx_resolved, rx_key_rejects = T.resolve_surrogate_keys(
-            rx_clean, dim_hcp, dim_product, dim_date, date_col="rx_date")
+        # ---------------- facts, in bounded batches ----------------
+        print(f"→ resolving surrogate keys and loading facts "
+              f"(batches of {C.CHUNK_ROWS:,} rows)")
 
-        calls_clean, calls_type_rejects = T.coerce_columns(
-            stg_calls, integer=["duration_minutes", "samples_dropped"], dates=["call_date"])
-        calls_resolved, calls_key_rejects = T.resolve_surrogate_keys(
-            calls_clean, dim_hcp, dim_product, dim_date, date_col="call_date")
+        FACT_SPECS = [
+            dict(table="staging.stg_prescriptions", target="warehouse.fact_prescriptions",
+                 date_col="rx_date", integer=["trx_count", "nrx_count"],
+                 numeric=["units", "gross_sales"],
+                 cols=["date_key", "hcp_key", "product_key", "territory_key",
+                       "trx_count", "nrx_count", "units", "gross_sales"],
+                 reject_file="prescriptions_rejects.csv", key="rx"),
+            dict(table="staging.stg_sales_calls", target="warehouse.fact_sales_calls",
+                 date_col="call_date", integer=["duration_minutes", "samples_dropped"],
+                 numeric=[],
+                 cols=["date_key", "hcp_key", "product_key", "territory_key",
+                       "call_type", "duration_minutes", "samples_dropped"],
+                 reject_file="sales_calls_rejects.csv", key="calls"),
+        ]
 
-        fact_tables = ["warehouse.fact_prescriptions", "warehouse.fact_sales_calls"]
+        C.REJECTS_DIR.mkdir(parents=True, exist_ok=True)
+        loaded_counts, reject_counts = {}, {}
+
+        fact_tables = [f["target"] for f in FACT_SPECS]
         copy_started = time.time()
         with ls.constraints_suspended(conn, fact_tables) as n_dropped:
             print(f"    foreign keys suspended for the load ({n_dropped} constraints)")
-            ls.copy_dataframe(conn, rx_resolved, "warehouse.fact_prescriptions",
-                              ["date_key", "hcp_key", "product_key", "territory_key",
-                               "trx_count", "nrx_count", "units", "gross_sales"])
-            ls.copy_dataframe(conn, calls_resolved, "warehouse.fact_sales_calls",
-                              ["date_key", "hcp_key", "product_key", "territory_key",
-                               "call_type", "duration_minutes", "samples_dropped"])
+            for spec in FACT_SPECS:
+                loaded = rejected = 0
+                rejects_out = []
+                for batch in _iter_staging(spec["table"]):
+                    clean, type_rej = T.coerce_columns(
+                        batch, integer=spec["integer"], numeric=spec["numeric"],
+                        dates=[spec["date_col"]])
+                    resolved, key_rej = T.resolve_surrogate_keys(
+                        clean, dim_hcp, dim_product, dim_date, date_col=spec["date_col"])
+                    ls.copy_dataframe(conn, resolved, spec["target"], spec["cols"])
+                    loaded += len(resolved)
+                    rejected += len(type_rej) + len(key_rej)
+                    for frame in (type_rej, key_rej):
+                        if len(frame):
+                            rejects_out.append(frame)
+                    # Release the batch before the next one is fetched.
+                    del batch, clean, resolved
+                loaded_counts[spec["key"]] = loaded
+                reject_counts[spec["key"]] = rejected
+                out = (pd.concat(rejects_out, ignore_index=True) if rejects_out
+                       else pd.DataFrame(columns=["reject_reason"]))
+                out.to_csv(C.REJECTS_DIR / spec["reject_file"], index=False)
+                print(f"    {spec['target']:<32} {loaded:>9,} loaded  {rejected:>5,} rejected")
+
         stats["fact_load_s"] = round(time.time() - copy_started, 1)
         print(f"    facts copied and constraints revalidated in {stats['fact_load_s']}s")
         conn.commit()
 
         # ---------------- reconciliation ----------------
-        rx_rejects = len(rx_type_rejects) + len(rx_key_rejects)
-        calls_rejects = len(calls_type_rejects) + len(calls_key_rejects)
-        C.REJECTS_DIR.mkdir(parents=True, exist_ok=True)
-        pd.concat([rx_type_rejects, rx_key_rejects], ignore_index=True) \
-            .to_csv(C.REJECTS_DIR / "prescriptions_rejects.csv", index=False)
-        pd.concat([calls_type_rejects, calls_key_rejects], ignore_index=True) \
-            .to_csv(C.REJECTS_DIR / "sales_calls_rejects.csv", index=False)
+        rx_rejects = reject_counts["rx"]
+        calls_rejects = reject_counts["calls"]
 
         stats.update(
             staged_rx=staged["staging.stg_prescriptions"],
-            loaded_rx=len(rx_resolved), rejected_rx=rx_rejects,
+            loaded_rx=loaded_counts["rx"], rejected_rx=rx_rejects,
             staged_calls=staged["staging.stg_sales_calls"],
-            loaded_calls=len(calls_resolved), rejected_calls=calls_rejects,
+            loaded_calls=loaded_counts["calls"], rejected_calls=calls_rejects,
             elapsed_s=round(time.time() - started, 1),
         )
 

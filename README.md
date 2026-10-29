@@ -32,9 +32,12 @@ Four queries, one schema, built to answer exactly those.
 
 | Document | For |
 |---|---|
-| [How RxInsight Works](docs/RxInsight-How-It-Works.pdf) ([md](docs/how-it-works.md)) | Architecture, data flow and the design decisions behind them |
-| [Interview Questions](docs/RxInsight-Interview-Questions.pdf) ([md](docs/interview-questions.md)) | Questions and model answers on this project and the fundamentals under it |
-| [The Tools Behind RxInsight](docs/RxInsight-Tools-Primer.pdf) ([md](docs/tools-primer.md)) | A plain-English primer if you do not already know Postgres, Docker or pandas |
+| [How RxInsight Works](docs/how-it-works.md) | Architecture, data flow and the design decisions behind them |
+| [Interview Questions](docs/interview-questions.md) | Questions and model answers on this project and the fundamentals under it |
+| [The Tools Behind RxInsight](docs/tools-primer.md) | A plain-English primer if you do not already know Postgres, Docker or pandas |
+
+Current behavior and measured results: [verification record](docs/verification.md).
+The original PDF snapshots are historical; the Markdown documents above are maintained.
 
 ## Quickstart
 
@@ -45,7 +48,7 @@ make generate    # synthesise the source extracts (~2.2M rows, seeded)
 make load        # run the ETL
 make report      # run the four analytics queries
 make tune        # measure what the indexes actually do
-make test        # 34 tests
+make test        # complete suite; fails if the database is unavailable
 ```
 
 Port **5544**, not 5432/5433 — those are usually already taken, and a port clash is the
@@ -253,58 +256,52 @@ touching the heap.
 | `territory_attainment.sql` | Who is behind plan, and what is the YTD trend? | Running total via `SUM() OVER (ORDER BY …)` |
 | `call_effectiveness.sql` | Do calls actually lift prescriptions? | 14-day lookback join, called vs. uncalled cohorts |
 
-Sample output — **do sales calls work?**
+The report compares prescribing HCP-months that have a call in the prior 14 days
+against prescribing HCP-months without one. It uses stable `hcp_id` across SCD
+versions, so a territory transfer neither erases exposure nor creates a second
+person-month. A month with a decile change is labelled using the version valid
+on its last prescribing day.
 
-```
-   stratum   |   cohort   | hcp_months | avg_trx_per_hcp_month | lift_pct
--------------+------------+------------+-----------------------+----------
- ALL DECILES | CALLED     |      39231 |                 39.31 |     65.8
- ALL DECILES | NOT CALLED |       7985 |                 23.71 |      0.0
- DECILE 01   | CALLED     |       1326 |                  3.21 |     94.5
- DECILE 02   | CALLED     |       2853 |                  7.47 |     73.7
-```
+`brand_share_mom.sql` calculates share **within each therapeutic area and month**;
+cardiology prescriptions are never divided by an endocrinology market.
 
-Called HCP-months average 39.31 TRx against 23.71 for uncalled — and the lift is largest in
-the *low* deciles, which is the commercially interesting read: the high-volume prescribers
-were going to write anyway.
+The generator and report both use days **1 through 14 before the prescription**,
+excluding the same day. Run `make report` for results from your database; the
+latest full-size outputs and measured values are described in
+[the verification record](docs/verification.md).
 
-*(The generator plants a 14-day post-call lift, so this measures that the pipeline and query
-recover a known signal. It is a correctness check, not a claim about real medicine.)*
+This is a synthetic software check and an observational comparison, not causal
+proof that promotional calls increase prescriptions.
 
 ---
 
 ## Tests
 
+`make test` runs the full warehouse and regression suite with `--require-db`.
+Missing PostgreSQL or an empty warehouse fails the check. To run only the pure
+transformations without a database:
+
+```bash
+.venv/bin/python -m pytest tests/test_transform.py tests/test_regressions.py -q
 ```
-36 passed
-```
 
-`tests/test_transform.py` — 15 pure unit tests, no database. This is why the transform
-logic is written as pure functions over DataFrames:
+CI runs the full ETL and all tests on both `requirements.txt` (pandas 3.1 /
+SQLAlchemy 2.1) and `requirements-compat.txt` (pandas 2.2 / SQLAlchemy 2.0).
+The default requirements are pinned for a reproducible install. SQLAlchemy
+explicitly uses the installed psycopg2 driver in both environments.
 
-* SCD2 closes the old row and opens exactly one new current row on a tracked change
-* SCD2 is a no-op when an *untracked* attribute (a rename) changes
-* unresolvable natural keys go to rejects, never silently dropped
-* `loaded + rejected == input`, always
-* rejects are selected by **position, not index label** — a regression test for a real bug
-  described below
+The regressions cover missing/fractional/non-finite/overflowing counts, invalid
+calendar dates, temporal lookup gaps, overlapping history, same-day/backdated
+SCD changes, therapeutic-market denominators, identity across transfers, and the
+14-day exposure boundaries. Exactly one destination or reject accounts for every
+input fact. Conflicting same-day and backdated tracked SCD updates are rejected;
+they require an explicit history backfill rather than silent rewriting.
 
-`tests/test_data_quality.py` — 21 assertions against the loaded warehouse:
+Warehouse tests verify reconciliation, all eight fact-to-dimension foreign keys,
+valid temporal versions, nulls, measure constraints, and actual analytical results.
+CI uses a smaller generated dataset; full-size runs are recorded separately.
 
-* row-count reconciliation against the reject files
-* no orphan foreign keys, across 7 fact→dimension relationships
-* null thresholds and `nrx_count <= trx_count`
-* the SCD2 invariant, and that no two versions of one HCP claim the same day
-* every fact resolves to the *temporally correct* HCP version
-
-They skip cleanly rather than failing when Postgres is not running.
-
-CI runs the **whole pipeline**, not just the unit tests: every push spins up Postgres,
-generates extracts, loads them end to end and runs all 36 assertions, then checks that every
-quarantined row is genuinely malformed — the regression guard for the bug below. It runs at a
-reduced scale (200k rows, set by `RXINSIGHT_RX_ROWS`) so it fits a CI minute; the pipeline
-code path is identical. The indexing measurement needs the full 2M rows to mean anything, so
-it is not part of CI.
+The historical regression below explains why row identity checks matter.
 
 ### A bug the tests did not catch
 
@@ -334,7 +331,7 @@ test fail; the other 35 still pass, which is the point.
 
 ## Stack
 
-Python 3.14 · pandas 3.0 · SQLAlchemy 2.0 · psycopg2 · PostgreSQL 16 · Docker Compose · pytest
+Python 3.12 · pinned pandas/SQLAlchemy requirements · psycopg2 · PostgreSQL 16 · Docker Compose · pytest
 
 ## What I would do next
 

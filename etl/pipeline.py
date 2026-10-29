@@ -17,6 +17,7 @@ import time
 
 import pandas as pd
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
 
 from etl import config as C
 from etl import load_staging as ls
@@ -40,7 +41,8 @@ _ENGINE = None
 def _engine():
     global _ENGINE
     if _ENGINE is None:
-        _ENGINE = create_engine(C.DATABASE_URL, future=True)
+        url = make_url(C.DATABASE_URL).set(drivername="postgresql+psycopg2")
+        _ENGINE = create_engine(url, future=True)
     return _ENGINE
 
 
@@ -73,11 +75,15 @@ def _date_bounds(conn):
     with conn.cursor() as cur:
         cur.execute(r"""
             SELECT min(d), max(d) FROM (
-                SELECT rx_date::date   AS d FROM staging.stg_prescriptions
-                 WHERE rx_date   ~ '^\d{4}-\d{2}-\d{2}$'
+                SELECT CASE WHEN rx_date ~ '^\d{4}-\d{2}-\d{2}$'
+                                  AND pg_input_is_valid(rx_date, 'date')
+                            THEN rx_date::date END AS d
+                  FROM staging.stg_prescriptions
                 UNION ALL
-                SELECT call_date::date     FROM staging.stg_sales_calls
-                 WHERE call_date ~ '^\d{4}-\d{2}-\d{2}$'
+                SELECT CASE WHEN call_date ~ '^\d{4}-\d{2}-\d{2}$'
+                                  AND pg_input_is_valid(call_date, 'date')
+                            THEN call_date::date END
+                  FROM staging.stg_sales_calls
             ) x
         """)
         return cur.fetchone()
@@ -128,6 +134,8 @@ def run(skip_schema: bool = False, skip_generate: bool = False) -> dict:
         ls.copy_dataframe(conn, terr, "warehouse.dim_territory", list(terr.columns))
 
         lo, hi = _date_bounds(conn)
+        if lo is None or hi is None:
+            raise ValueError("No valid source fact dates; cannot build the calendar")
         dim_date = T.build_dim_date(lo, hi)
         ls.copy_dataframe(conn, dim_date, "warehouse.dim_date", list(dim_date.columns))
         conn.commit()
@@ -219,8 +227,6 @@ def run(skip_schema: bool = False, skip_generate: bool = False) -> dict:
 
         stats["fact_load_s"] = round(time.time() - copy_started, 1)
         print(f"    facts copied and constraints revalidated in {stats['fact_load_s']}s")
-        conn.commit()
-
         # ---------------- reconciliation ----------------
         rx_rejects = reject_counts["rx"]
         calls_rejects = reject_counts["calls"]
@@ -245,7 +251,9 @@ def run(skip_schema: bool = False, skip_generate: bool = False) -> dict:
         print(f"\n  reconciliation: prescriptions {'OK' if ok_rx else 'MISMATCH'}, "
               f"sales_calls {'OK' if ok_calls else 'MISMATCH'}")
         if not (ok_rx and ok_calls):
-            raise SystemExit("row-count reconciliation failed — rows went missing")
+            raise ValueError("row-count reconciliation failed — rows went missing")
+
+        conn.commit()
 
         print(f"  completed in {stats['elapsed_s']}s")
         return stats

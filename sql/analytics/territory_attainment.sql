@@ -84,7 +84,8 @@ sequenced AS (
 ),
 baseline AS (
     SELECT territory_key,
-           AVG(actual_trx) AS baseline_monthly_trx
+           SUM(actual_trx) AS baseline_trx,
+           COUNT(*) AS baseline_months
     FROM sequenced
     WHERE month_seq <= 6
     GROUP BY territory_key
@@ -100,8 +101,10 @@ planned AS (
            s.month_seq,
            s.actual_trx,
            s.actual_gross_sales,
-           ROUND(b.baseline_monthly_trx)          AS baseline_monthly_trx,
-           ROUND(b.baseline_monthly_trx * 1.08)   AS target_trx
+           ROUND(b.baseline_trx / b.baseline_months) AS baseline_monthly_trx,
+           -- Multiply before division: AVG(8675/6) * 1.08 can land just
+           -- below the exact 1561.50 boundary and round to the wrong quota.
+           ROUND(b.baseline_trx * 1.08 / b.baseline_months) AS target_trx
     FROM sequenced s
     JOIN baseline  b USING (territory_key)
 )

@@ -59,20 +59,36 @@ def coerce_columns(df: pd.DataFrame, numeric=(), integer=(), dates=()):
     bad = pd.Series(False, index=work.index)
     reasons = pd.Series("", index=work.index)
 
+    required = set(numeric) | set(integer) | set(dates)
+    if required - set(work.columns):
+        raise ValueError(f"Missing source columns: {sorted(required - set(work.columns))}")
+
     for col in list(numeric) + list(integer):
-        if col not in work.columns:
-            continue
         cast = pd.to_numeric(work[col], errors="coerce")
-        failed = cast.isna() & work[col].notna()
+        missing = work[col].isna() | work[col].astype(str).str.strip().eq("")
+        failed = cast.isna() | ~np.isfinite(cast)
         reasons[failed & ~bad] = f"non-numeric value in {col}"
+        reasons[missing & ~bad] = f"missing value in {col}"
         bad |= failed
+        if col in integer:
+            fractional = cast.notna() & np.isfinite(cast) & cast.mod(1).ne(0)
+            reasons[fractional & ~bad] = f"non-integer value in {col}"
+            bad |= fractional
+            # Use the destination's integer bounds where known. Never let an
+            # overflowing or fractional number reach astype/COPY.
+            bounds = {"decile": (1, 10), "trx_count": (0, 2**31 - 1),
+                      "nrx_count": (0, 2**31 - 1),
+                      "duration_minutes": (0, 2**15 - 1),
+                      "samples_dropped": (0, 2**15 - 1)}
+            lo, hi = bounds.get(col, (-2**63, 2**63 - 1))
+            outside = cast.lt(lo) | cast.gt(hi)
+            reasons[outside & ~bad] = f"out-of-range value in {col}"
+            bad |= outside
         work[col] = cast
 
     for col in dates:
-        if col not in work.columns:
-            continue
-        cast = pd.to_datetime(work[col], errors="coerce")
-        failed = cast.isna() & work[col].notna()
+        cast = pd.to_datetime(work[col], format="%Y-%m-%d", errors="coerce")
+        failed = cast.isna()
         reasons[failed & ~bad] = f"unparseable date in {col}"
         bad |= failed
         work[col] = cast
@@ -126,9 +142,14 @@ def apply_scd2(existing_dim: pd.DataFrame,
 
     incoming = incoming.copy()
     incoming[effective_col] = pd.to_datetime(incoming[effective_col])
+    if incoming[effective_col].isna().any():
+        raise ValueError("SCD effective dates must be present")
     incoming = incoming.sort_values([business_key, effective_col], kind="stable")
 
     rows = state.to_dict("records")
+    for row in rows:
+        if row["valid_from"] > row["valid_to"]:
+            raise ValueError("Existing SCD history has an inverted validity window")
     # Index of the live row per business key, so each change is O(1) to find.
     current_at = {r[business_key]: i for i, r in enumerate(rows) if r.get("is_current")}
 
@@ -147,6 +168,11 @@ def apply_scd2(existing_dim: pd.DataFrame,
         live = rows[idx]
         if all(live.get(t) == rec.get(t) for t in tracked):
             continue                                  # nothing tracked changed
+
+        # Daily history is immutable. Ambiguous same-day corrections and
+        # backdated changes need an explicit backfill, not a negative interval.
+        if eff <= pd.Timestamp(live["valid_from"]):
+            raise ValueError(f"SCD change for {key} must be after its current valid_from")
 
         live["valid_to"] = eff - pd.Timedelta(days=1)
         live["is_current"] = False
@@ -183,25 +209,35 @@ def resolve_surrogate_keys(facts: pd.DataFrame,
     """
     work = facts.copy()
     work["_row"] = range(len(work))
-    work[date_col] = pd.to_datetime(work[date_col])
+    work[date_col] = pd.to_datetime(work[date_col], format="%Y-%m-%d", errors="coerce")
 
     # --- product ---
     prod = dim_product[["product_code", "product_key"]]
-    work = work.merge(prod, on="product_code", how="left")
+    work = work.merge(prod, on="product_code", how="left", validate="many_to_one")
 
     # --- HCP, as-of the fact date ---
     hcp = dim_hcp[["hcp_id", "hcp_key", "territory_key", "valid_from", "valid_to"]].copy()
-    hcp["valid_from"] = pd.to_datetime(hcp["valid_from"])
-    hcp["valid_to"] = pd.to_datetime(hcp["valid_to"])
+    # Python dates preserve the year-9999 sentinel on pandas 2.x as well as 3.x.
+    # A vector to_datetime on pandas 2.x forces nanoseconds and overflows.
+    for col in ("valid_from", "valid_to"):
+        hcp[col] = hcp[col].map(lambda value: pd.Timestamp(value).date())
 
-    work = work.merge(hcp, on="hcp_id", how="left")
-    in_window = (work[date_col] >= work["valid_from"]) & (work[date_col] <= work["valid_to"])
-    # Keep the matching version; keep unmatched rows once so they can be rejected.
-    work = work[in_window | work["hcp_key"].isna()]
-    work = work.drop_duplicates("_row", keep="first")
+    candidates = work.merge(hcp, on="hcp_id", how="left")
+    comparable = candidates[date_col].notna() & candidates["hcp_key"].notna()
+    in_window = pd.Series(False, index=candidates.index)
+    fact_days = candidates.loc[comparable, date_col].dt.date
+    in_window.loc[comparable] = (
+        (fact_days >= candidates.loc[comparable, "valid_from"])
+        & (fact_days <= candidates.loc[comparable, "valid_to"]))
+    matches = candidates.loc[in_window, ["_row", "hcp_key", "territory_key"]]
+    ambiguous = set(matches.loc[matches.duplicated("_row", keep=False), "_row"])
+    matches = matches.drop_duplicates("_row", keep=False)
+    # Join matches BACK to every input position: known HCPs with no valid
+    # history version must survive long enough to enter the reject path.
+    work = work.merge(matches, on="_row", how="left", validate="one_to_one")
 
     # --- date ---
-    work["date_key"] = work[date_col].dt.strftime("%Y%m%d").astype("int64")
+    work["date_key"] = pd.to_numeric(work[date_col].dt.strftime("%Y%m%d"), errors="coerce").astype("Int64")
     valid_dates = set(dim_date["date_key"].tolist())
     date_ok = work["date_key"].isin(valid_dates)
 
@@ -219,16 +255,21 @@ def resolve_surrogate_keys(facts: pd.DataFrame,
     unres = work.loc[unresolved]
     rejects = facts.iloc[unres["_row"].to_numpy()].copy()
     rejects["reject_reason"] = np.select(
-        [unres["product_key"].isna().to_numpy(), unres["hcp_key"].isna().to_numpy()],
-        ["unknown product_code", "unknown hcp_id"],
+        [unres[date_col].isna().to_numpy(), unres["product_key"].isna().to_numpy(),
+         (~unres["hcp_id"].isin(dim_hcp["hcp_id"])).to_numpy(),
+         unres["_row"].isin(ambiguous).to_numpy(), unres["hcp_key"].isna().to_numpy()],
+        [f"missing or invalid {date_col}", "unknown product_code", "unknown hcp_id",
+         "overlapping HCP versions", "no valid HCP version"],
         default="date outside dim_date")
 
     resolved = work[~unresolved].copy()
-    for col in ("hcp_key", "product_key", "territory_key"):
+    for col in ("date_key", "hcp_key", "product_key", "territory_key"):
         resolved[col] = resolved[col].astype("int64")
 
     resolved = resolved.drop(columns=[c for c in
                                       ["_row", "valid_from", "valid_to", date_col,
                                        "hcp_id", "product_code"]
                                       if c in resolved.columns])
+    if len(resolved) + len(rejects) != len(facts):
+        raise RuntimeError("Key resolution failed input-row reconciliation")
     return resolved, rejects

@@ -1,7 +1,7 @@
 # RxInsight — pharmaceutical commercial analytics warehouse
 PY := .venv/bin/python
 PIP := .venv/bin/pip
-PSQL := docker exec -i rxinsight-db psql -U rxinsight -d rxinsight
+PSQL := docker exec -i rxinsight-db psql -v ON_ERROR_STOP=1 -U rxinsight -d rxinsight
 DSN := postgresql://rxinsight:rxinsight@localhost:5544/rxinsight
 
 .PHONY: help venv up down load generate report test tune clean
@@ -27,7 +27,7 @@ load: ## run the full ETL pipeline (schema, COPY, transform, load)
 	$(PY) -m etl.pipeline
 
 report: ## run the four analytics queries
-	@for q in sql/analytics/*.sql; do \
+	@set -e; for q in sql/analytics/*.sql; do \
 		echo "\n=== $$q ==="; $(PSQL) -f /dev/stdin < $$q; \
 	done
 
@@ -35,7 +35,7 @@ tune: ## measure the flagship report before and after indexing
 	$(PY) -m etl.measure
 
 test: ## run the test suite
-	.venv/bin/pytest tests -q
+	.venv/bin/pytest tests -q --require-db
 
 clean: ## remove generated CSVs and caches
 	rm -f data/*.csv; find . -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true

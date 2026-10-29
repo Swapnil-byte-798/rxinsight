@@ -1,5 +1,8 @@
 # RxInsight — Interview Questions and Answers
 
+> Updated 29 October 2026. Current behavior and executed checks: [verification.md](verification.md). Earlier timing examples are historical; original PDF snapshots are not maintained.
+
+
 Preparation notes for defending this project in a Business Technology Solutions Associate
 interview. Every number here was measured on the machine that built the project, or queried from
 the loaded database while writing this. Where something did not work, the answer says so.
@@ -71,7 +74,7 @@ you can ever ask. Had I pre-aggregated to the month, the 14-day post-call lookba
 
 **A:** A dimension shared by more than one fact table with identical keys and meaning. All four of
 mine are conformed across prescriptions and sales calls, which is what makes the call-effectiveness
-query possible — I can join calls to prescriptions on `hcp_key` because both facts mean the same
+query possible. Facts retain historical `hcp_key`; longitudinal exposure resolves stable `hcp_id` across versions because both facts describe the same
 thing by that key. Without conformity you get two reports that both say "territory" and quietly
 disagree.
 
@@ -169,7 +172,7 @@ reports a retroactive change, facts already loaded are not rebuilt.
 **A:** `GROUP BY` collapses rows; a window keeps every row and adds a value computed over a related
 set. The moment you need the detail line and the aggregate on the same row, you need a window. In
 `brand_share_mom.sql` I need each brand's monthly TRx beside the whole market's total, and `SUM(trx)
-OVER (PARTITION BY year_month)` gives that denominator without a self-join.
+OVER (PARTITION BY year_month, therapeutic_area)` gives a denominator for the correct market without a self-join.
 
 ### Q: What does `NTILE` do, and where do you use it?
 
@@ -181,7 +184,7 @@ can only call on doctors in their own geography.
 ### Q: Explain `LAG` and how you used it.
 
 **A:** `LAG` reads a value from an earlier row in the same partition, following the window's
-ordering. `LAG(share_pct) OVER (PARTITION BY brand_name ORDER BY year_month)` gives last month's
+ordering. `LAG(share_pct) OVER (PARTITION BY therapeutic_area, brand_name ORDER BY year_month)` gives last month's
 share for the same brand, and subtracting yields the month-over-month delta in percentage points.
 Partitioning by brand stops brand A's January being compared with brand B's December, and the first
 month correctly yields NULL rather than a fake zero.
@@ -317,7 +320,7 @@ makes retention cheap, since dropping an old month becomes a `DROP TABLE` rather
 
 **A:** Every function in `etl/transform.py` takes DataFrames and returns DataFrames — none open a
 connection, read a file or look at the clock. That means the SCD2 logic can be tested against five
-hand-written rows in milliseconds with no Postgres near the test, which is why 15 of my 36 tests
+hand-written rows in milliseconds with no Postgres near the test, which is why the pure transformation tests
 need no database at all.
 
 ### Q: Why `COPY` instead of `pandas.to_sql`?
@@ -374,13 +377,16 @@ obvious-looking parameter is the half that does nothing.
 
 ### Q: What do you test, and why those things?
 
-**A:** Thirty-six tests in two groups. Fifteen are pure unit tests over the transform functions:
+**A:** Sixty-seven tests across transformations, loaded data, and business results.
+Thirty-six are pure unit tests over the transform functions:
 that a tracked change creates a version and an untracked rename does not, that a bad cast is
 quarantined rather than raised, that loaded plus rejected always equals input, and — added after the
 bug in section 9 — that every rejected row actually exhibits the reason it was labelled with, even
 when the frame's index has gaps. Twenty-one are data-quality assertions against the loaded warehouse
 — reconciliation, orphan foreign keys across eight relationships, null and non-negativity
-thresholds, `nrx_count <= trx_count`, and the SCD2 invariants.
+thresholds, `nrx_count <= trx_count`, and the SCD2 invariants. Ten SQL acceptance
+tests check market definitions, person identity, quota rounding, invalid dates,
+and constraint restoration. CI runs the suite on both dependency combinations.
 
 ### Q: What is the reconciliation identity and why does it matter?
 
@@ -435,20 +441,17 @@ return-on-promotion question that decides next year's field-force budget.
 
 ### Q: Your call-effectiveness result — what does it say, and how much do you believe it?
 
-**A:** Called HCP-months average 39.31 TRx against 23.71 for uncalled, a 65.8% lift, and the lift is
-largest in the low deciles: 94.5% in decile 1 down to 30.7% in decile 10, non-increasing the whole
-way, though deciles 7 and 8 tie at 34.9%. That direction
-is the commercially interesting read, not the headline — the high-volume prescribers were going to
-write anyway, so the marginal call is worth more at the bottom of the book than the top. As a
-measurement of this pipeline I believe it completely; as medicine, not at all, because the generator
-deliberately plants a 14-day post-call lift and recovering it is a correctness check that the ETL
-preserved a known signal.
+**A:** I quote the current values from `make report` and the dated
+[verification record](verification.md), rather than reuse results from the old
+generator/query version. The report follows the same person across SCD transfers
+and counts one HCP-month. The generator deliberately encodes a 14-day signal,
+which makes this a software check, not a real commercial finding.
 
 ### Q: Suppose the data were real. What would be wrong with that analysis?
 
 **A:** It is observational and confounded in the obvious direction: reps deliberately call on high
 prescribers, so the called cohort is selected for people who would have written more anyway. The
-national lift is an upper bound, and stratifying by decile is the cheap partial control, which is
+national lift can be biased, and stratifying by decile is the cheap partial control, which is
 why the per-decile rows are what I would defend in a meeting. There is also a survivorship quirk: an
 HCP-month only exists if that doctor wrote at least one script, so months of silence are invisible.
 

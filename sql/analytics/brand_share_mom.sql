@@ -15,9 +15,9 @@
 --   competitive response (message change, sampling push, share-of-voice shift).
 --   This is also the query used for the index-tuning benchmark in the README.
 --
--- GRAIN      one row per (year_month, brand_name)
+-- GRAIN      one row per (year_month, therapeutic_area, brand_name)
 -- MEASURES   trx           = total scripts for the brand that month
---            share_pct     = brand TRx / all-brand TRx that month, in percent
+--            share_pct     = brand TRx / therapeutic-market TRx that month
 --            share_delta_pp = change in share_pct vs the brand's prior month,
 --                             in percentage points (a point change, not a
 --                             percent change -- 12.0 -> 13.0 is +1.0 pp)
@@ -34,18 +34,21 @@
 -- ============================================================================
 
 WITH monthly AS (
-    SELECT d.year_month, p.brand_name, p.is_competitor, SUM(f.trx_count) AS trx
+    SELECT d.year_month, p.brand_name, p.therapeutic_area, SUM(f.trx_count) AS trx
     FROM warehouse.fact_prescriptions f
     JOIN warehouse.dim_date d    USING (date_key)
     JOIN warehouse.dim_product p USING (product_key)
-    GROUP BY d.year_month, p.brand_name, p.is_competitor
+    GROUP BY d.year_month, p.brand_name, p.therapeutic_area
 ),
 shared AS (
-    SELECT year_month, brand_name, trx,
-           ROUND(100.0 * trx / NULLIF(SUM(trx) OVER (PARTITION BY year_month), 0), 2) AS share_pct
+    SELECT year_month, brand_name, therapeutic_area, trx,
+           ROUND(100.0 * trx / NULLIF(SUM(trx) OVER
+                 (PARTITION BY year_month, therapeutic_area), 0), 2) AS share_pct
     FROM monthly
 )
 SELECT year_month, brand_name, trx, share_pct,
-       share_pct - LAG(share_pct) OVER (PARTITION BY brand_name ORDER BY year_month) AS share_delta_pp
+       share_pct - LAG(share_pct) OVER
+           (PARTITION BY therapeutic_area, brand_name ORDER BY year_month) AS share_delta_pp,
+       therapeutic_area
 FROM shared
-ORDER BY year_month, share_pct DESC;
+ORDER BY year_month, therapeutic_area, share_pct DESC;

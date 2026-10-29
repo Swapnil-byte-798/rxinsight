@@ -10,6 +10,10 @@ jobs:
   test:
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        requirements: [requirements.txt, requirements-compat.txt]
 
     services:
       postgres:
@@ -46,16 +50,16 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt
+          pip install -r ${{ matrix.requirements }}
 
       - name: Unit tests (no database)
-        run: pytest tests/test_transform.py -q
+        run: pytest tests/test_transform.py tests/test_regressions.py -q
 
       - name: Run the pipeline end to end
         run: python -m etl.pipeline
 
       - name: Full suite, including data-quality assertions
-        run: pytest tests -q
+        run: pytest tests -q --require-db
 
       - name: Every quarantined row must genuinely be malformed
         run: |

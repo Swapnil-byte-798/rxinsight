@@ -1,5 +1,8 @@
 # How RxInsight Works
 
+> Updated 29 October 2026. Current behavior and executed checks: [verification.md](verification.md). Earlier timing examples are historical; original PDF snapshots are not maintained.
+
+
 RxInsight is a small pharmaceutical commercial analytics warehouse: a PostgreSQL star
 schema, a Python ETL that maintains a Type 2 slowly changing dimension, and four
 window-function reports over roughly 2.2 million prescription rows.
@@ -270,12 +273,11 @@ payoff of section 4 rather than a wrinkle to apologise for. Territory 001's top 
 
 ### `brand_share_mom.sql` — are we winning or just floating?
 
-*What share of the market does each brand hold each month, and which way is it moving?*
-`SUM(trx) OVER (PARTITION BY year_month)` gives the monthly denominator;
-`LAG(share_pct) OVER (PARTITION BY brand_name ORDER BY year_month)` gives the change in
-percentage points. Competitor products are deliberately not filtered out — the denominator
-has to be the whole market or "share" means nothing. Unedited output for 2024-02: Pulmovent
-at 18.68% share, +0.51 pp on January, against Cardiova at 18.39%, −0.09 pp.
+*What share of its therapeutic market does each brand hold each month?*
+`SUM(trx) OVER (PARTITION BY year_month, therapeutic_area)` gives the market
+denominator. Competitor brands remain included within that therapeutic area.
+`LAG` partitions by therapeutic area and brand. The output includes
+`therapeutic_area`, so separate markets are not mixed into a portfolio denominator.
 
 ### `territory_attainment.sql` — who is behind plan?
 
@@ -300,14 +302,20 @@ cannot drift from detail, and a windowed `MAX(...) FILTER (WHERE cohort = 'NOT C
 off one line. Output is one row per decile stratum per cohort, with HCP-months, average and
 median TRx, and the lift.
 
-Called HCP-months average **39.31 TRx** against **23.71** uncalled, a **+65.8%** lift —
-largest in the *low* deciles (decile 01: +94.5%, decile 02: +73.7%).
+Exposure and monthly grouping use stable `hcp_id`, not the SCD version key.
+The same person has one month even if their territory changes. Label that month
+with the decile valid on its last prescribing day. The generator uses the same
+exclusive-of-today, inclusive-of-day-14 lookback as this SQL.
 
-**Read that carefully.** The generator deliberately plants a 14-day post-call lift, so this
-verifies that the pipeline and query recover a known signal. It is a correctness check on
-the system, not a claim about real medicine. Even with real data the comparison would be
-observational and confounded in the obvious direction — reps choose to call on high
-prescribers — which is why the query stratifies by decile.
+Current measured cohort results are in [verification.md](verification.md).
+The data is synthetic and the comparison is observational. Stratification does
+not establish causal effect or guarantee an upper bound on that effect.
+
+The loader rejects missing, fractional, non-finite, and out-of-range counts.
+Calendar boundaries use guarded PostgreSQL 16 input validation before casting,
+so impossible dates reach quarantine. SCD history dates are compared as Python
+dates to preserve `9999-12-31` on pandas 2.2 and 3.1. Conflicting same-day or
+backdated changes raise an error; the database rejects inverted date intervals.
 
 ## 8. Indexing: what helped and what did not
 
@@ -376,7 +384,7 @@ no statistics for is an index it will not choose.
 
 ## 9. Testing
 
-36 tests, in two halves that do genuinely different jobs.
+The suite includes pure unit tests, loaded-warehouse checks, and business-result regressions. See [verification.md](verification.md) for executed counts.
 
 **`tests/test_transform.py` — 15 pure unit tests, no database.** SCD2 closes the old row and
 opens exactly one new current one on a tracked change; an untracked change (a rename) is a
@@ -416,8 +424,9 @@ WHERE d.full_date < h.valid_from OR d.full_date > h.valid_to;
 ```
 
 That must be zero; a load that resolved keys to "whichever version is live now" would fail it
-on every historical row. The DB fixtures **skip** rather than fail when Postgres is
-unreachable or the warehouse is empty, so the unit half stays runnable anywhere.
+on every historical row. The default pytest fixtures can skip when no database is
+available, so pure units remain runnable separately. `make test` and CI explicitly
+use `--require-db`: unavailable PostgreSQL or an empty warehouse then fails.
 
 ## 10. Limitations, and what changes at 200M rows
 

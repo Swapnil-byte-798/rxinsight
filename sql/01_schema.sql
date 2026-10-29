@@ -98,7 +98,8 @@ CREATE TABLE warehouse.dim_hcp (
     territory_key INTEGER  NOT NULL REFERENCES warehouse.dim_territory(territory_key),
     valid_from    DATE     NOT NULL,
     valid_to      DATE     NOT NULL DEFAULT '9999-12-31',
-    is_current    BOOLEAN  NOT NULL DEFAULT TRUE
+    is_current    BOOLEAN  NOT NULL DEFAULT TRUE,
+    CONSTRAINT ck_hcp_valid_window CHECK (valid_from <= valid_to)
 );
 
 -- Exactly one current row per HCP — enforced, not assumed.

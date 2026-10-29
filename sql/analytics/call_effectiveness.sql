@@ -37,13 +37,20 @@
 --   The comparison is observational, not a randomised experiment, and it is
 --   confounded in the obvious direction: reps deliberately call on high-decile
 --   HCPs, so high prescribers are over-represented in the CALLED cohort. The
---   national lift is therefore an upper bound. Stratifying by decile is the
+--   national lift is therefore potentially biased. Stratifying by decile is the
 --   cheap control -- within a single decile the targeting bias is much smaller,
 --   so the per-decile lift is the number to defend in a meeting. A clean causal
 --   read needs a matched-control or pre/post design; that is the next iteration,
 --   not something this query claims.
 --   Second caveat: an HCP-month only exists here if the HCP wrote at least one
 --   script that month, because months with no prescribing leave no fact row.
+--
+-- IDENTITY AND SEGMENTATION
+--   Use the stable hcp_id across SCD versions for both exposure and monthly
+--   counts. A call before a territory transfer can still expose a later script.
+--   Each person contributes at most one HCP-month. If decile changes within a
+--   month, label that entire HCP-month with the version valid on its last
+--   prescribing day. This is a declared reporting policy, not a causal control.
 --
 -- PERFORMANCE
 --   Both facts are aggregated to HCP-day BEFORE the range join. Joining ~2M raw
@@ -58,55 +65,57 @@
 WITH rx_days AS (
     -- Own-brand scripts per HCP per day. Competitor volume is not something a
     -- call from our rep is supposed to move.
-    SELECT f.hcp_key,
+    SELECT h.hcp_id,
            d.full_date  AS rx_date,
            d.year_month,
            SUM(f.trx_count) AS trx
     FROM warehouse.fact_prescriptions f
     JOIN warehouse.dim_date    d USING (date_key)
     JOIN warehouse.dim_product p USING (product_key)
+    JOIN warehouse.dim_hcp h USING (hcp_key)
     WHERE p.is_competitor = FALSE
-    GROUP BY f.hcp_key, d.full_date, d.year_month
+    GROUP BY h.hcp_id, d.full_date, d.year_month
 ),
 call_days AS (
     -- One row per HCP per day on which that HCP was called on at all; call type
     -- and duration do not change whether the HCP was touched.
     SELECT DISTINCT
-           c.hcp_key,
+           h.hcp_id,
            d.full_date AS call_date
     FROM warehouse.fact_sales_calls c
     JOIN warehouse.dim_date    d USING (date_key)
     JOIN warehouse.dim_product p USING (product_key)
+    JOIN warehouse.dim_hcp h USING (hcp_key)
     WHERE p.is_competitor = FALSE
 ),
 rx_day_exposure AS (
     -- The 14-day lookback. LEFT JOIN, so prescribing days with no preceding
     -- call survive as the control group instead of disappearing.
-    SELECT r.hcp_key,
+    SELECT r.hcp_id,
            r.year_month,
            r.rx_date,
            r.trx,
            BOOL_OR(c.call_date IS NOT NULL) AS called_in_prior_14d
     FROM rx_days r
     LEFT JOIN call_days c
-           ON c.hcp_key = r.hcp_key
+           ON c.hcp_id = r.hcp_id
           AND c.call_date BETWEEN r.rx_date - 14 AND r.rx_date - 1
-    GROUP BY r.hcp_key, r.year_month, r.rx_date, r.trx
+    GROUP BY r.hcp_id, r.year_month, r.rx_date, r.trx
 ),
 hcp_months AS (
-    SELECT e.hcp_key,
+    SELECT e.hcp_id,
            e.year_month,
+           MAX(e.rx_date)                                   AS last_rx_date,
            SUM(e.trx)                                        AS trx_in_month,
            COUNT(*)                                          AS rx_days_in_month,
            COUNT(*) FILTER (WHERE e.called_in_prior_14d)     AS exposed_rx_days,
            BOOL_OR(e.called_in_prior_14d)                    AS was_called
     FROM rx_day_exposure e
-    GROUP BY e.hcp_key, e.year_month
+    GROUP BY e.hcp_id, e.year_month
 ),
 labelled AS (
-    -- dim_hcp is joined on the surrogate key, so the decile attached is the one
-    -- that was current when the scripts were written, not today's decile.
-    SELECT m.hcp_key,
+    -- The segment is as-of the month's last prescribing day, never today's.
+    SELECT m.hcp_id,
            m.year_month,
            m.trx_in_month,
            m.rx_days_in_month,
@@ -114,7 +123,8 @@ labelled AS (
            h.decile,
            CASE WHEN m.was_called THEN 'CALLED' ELSE 'NOT CALLED' END AS cohort
     FROM hcp_months m
-    JOIN warehouse.dim_hcp h ON h.hcp_key = m.hcp_key
+    JOIN warehouse.dim_hcp h ON h.hcp_id = m.hcp_id
+                           AND m.last_rx_date BETWEEN h.valid_from AND h.valid_to
 ),
 cohort_stats AS (
     SELECT CASE
@@ -124,7 +134,7 @@ cohort_stats AS (
            END                                            AS stratum,
            GROUPING(decile)                               AS is_national_row,
            cohort,
-           COUNT(DISTINCT hcp_key)                        AS hcps,
+           COUNT(DISTINCT hcp_id)                         AS hcps,
            COUNT(*)                                       AS hcp_months,
            SUM(trx_in_month)                              AS total_trx,
            ROUND(AVG(trx_in_month), 2)                    AS avg_trx_per_hcp_month,

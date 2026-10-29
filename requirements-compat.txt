@@ -1,0 +1,6 @@
+# The older supported pandas/SQLAlchemy combination exercised in CI.
+pandas==2.2.3
+numpy==2.2.6
+SQLAlchemy==2.0.55
+psycopg2-binary==2.9.13
+pytest==9.1.1

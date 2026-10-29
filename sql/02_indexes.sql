@@ -32,10 +32,11 @@
 -- =============================================================================
 
 -- ---------------------------------------------------------------------------
--- 1. The flagship index — target of the before/after EXPLAIN ANALYZE.
+-- 1. Covering index for selective date/product access.
 --
--- Serves brand_share_mom.sql, which scans fact_prescriptions, joins dim_date and
--- dim_product, and aggregates SUM(trx_count) by month and brand.
+-- Supports a date/product-filtered variant of the brand report. The unfiltered
+-- brand_share_mom.sql still reads the full fact table; a parallel sequential
+-- scan is expected there. The measured selective win is from idx_rx_hcp below.
 --
 -- Why (date_key, product_key) and not the reverse:
 --   * date_key leads because every commercial report is period-bounded ("last 12
@@ -43,16 +44,15 @@
 --     cardinality, most selective predicate — a one-month filter cuts ~2M rows to
 --     ~85K. product_key has only 8 distinct values; leading with it would cut the
 --     scan to 1/8th at best and then still force a full range walk per product.
---   * product_key second refines within the date range and lets the planner feed
---     an already-sorted stream into the group-by, avoiding a sort.
+--   * product_key second checks the product within the chosen date range.
 --
 -- Why INCLUDE (trx_count):
 --   trx_count is the measure being summed, not a filter. Carrying it as an
 --   INCLUDE payload rather than a fourth key column keeps the B-tree narrow (no
 --   extra sort level, smaller internal pages) while still allowing an INDEX ONLY
 --   SCAN — the aggregate reads the index and never touches the heap. That is
---   where the bulk of the measured speedup comes from: heap fetches disappear
---   from the BUFFERS line entirely.
+--   useful for selective period-bounded reports. This does not imply an index-
+--   only scan or a measured speedup for the full-table brand-share aggregate.
 -- ---------------------------------------------------------------------------
 CREATE INDEX IF NOT EXISTS idx_rx_date_product
     ON warehouse.fact_prescriptions (date_key, product_key)

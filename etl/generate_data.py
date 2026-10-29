@@ -91,7 +91,7 @@ def _sales_calls(rng, hcp_ids, own_products, dates) -> pd.DataFrame:
     prod_idx = rng.integers(0, len(own_products), size=n_calls)
     # Calls land on weekdays; reps do not work Sundays.
     day_idx = rng.integers(0, n_days, size=n_calls)
-    weekday_ok = dates[day_idx].dayofweek < 5
+    weekday_ok = dates[day_idx].day_of_week < 5
     hcp_idx, prod_idx, day_idx = hcp_idx[weekday_ok], prod_idx[weekday_ok], day_idx[weekday_ok]
 
     df = pd.DataFrame({
@@ -116,9 +116,11 @@ def _call_lift_window(hcp_idx, prod_idx, day_idx, n_prod, n_days):
     counts = np.zeros((C.N_HCPS, n_prod, n_days), dtype=np.int16)
     np.add.at(counts, (hcp_idx, prod_idx, day_idx), 1)
     csum = np.cumsum(counts, axis=2, dtype=np.int32)
-    shifted = np.zeros_like(csum)
-    shifted[:, :, LIFT_WINDOW_DAYS:] = csum[:, :, :-LIFT_WINDOW_DAYS]
-    return (csum - shifted).astype(np.int16)
+    prior = np.zeros_like(csum)
+    prior[:, :, 1:] = csum[:, :, :-1]
+    shifted = np.zeros_like(prior)
+    shifted[:, :, LIFT_WINDOW_DAYS:] = prior[:, :, :-LIFT_WINDOW_DAYS]
+    return (prior - shifted).astype(np.int16)
 
 
 def generate() -> None:
@@ -160,7 +162,7 @@ def generate() -> None:
     # Seasonality plus a mild upward drift, so month-over-month share moves.
     t = np.arange(n_days)
     day_w = 1.0 + 0.18 * np.sin(2 * np.pi * t / 365.0) + 0.0004 * t
-    day_w[dates.dayofweek >= 5] *= 0.35          # weekends are quiet
+    day_w[dates.day_of_week >= 5] *= 0.35          # weekends are quiet
     day_w = np.clip(day_w, 0.05, None)
     day_w /= day_w.sum()
 

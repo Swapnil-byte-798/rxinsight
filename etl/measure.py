@@ -101,7 +101,7 @@ def main() -> dict:
             print(f"  {label:<22}{r['before_ms']:>10.1f}ms{r['after_ms']:>10.1f}ms"
                   f"{verdict:>13}   {r['after_plan']}")
         print()
-        print("  Read that second row honestly: the composite index does not help an")
+        print("  Read the full-aggregate row honestly: the composite index does not help an")
         print("  aggregate with no selective predicate, and can lose to a parallel seq")
         print("  scan. An index earns its keep on selectivity, not on table size.\n")
         return results

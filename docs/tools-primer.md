@@ -1,5 +1,8 @@
 # The Tools Behind RxInsight — A Plain-English Primer
 
+> Updated 29 October 2026. Current behavior and executed checks: [verification.md](verification.md). Earlier timing examples are historical; original PDF snapshots are not maintained.
+
+
 RxInsight is a small **data warehouse** of pharmaceutical sales data. A data warehouse is a
 database built for a specific purpose: not to run a business minute by minute, but to hold a
 copy of what already happened — cleaned, organised, and arranged so that questions about all
@@ -583,21 +586,23 @@ guessing at a fixed number of seconds.
 ### pytest and why tests exist
 
 A **test** is code that checks other code, automatically. **pytest** is the tool that finds
-and runs them. `make test` runs all **34** of this project's tests in well under half a
-minute.
+and runs them. `make test` runs the full suite with PostgreSQL required.
+The pure unit tests can run separately without a database.
 
-They come in two kinds:
+They cover three layers:
 
-- **14 unit tests** (`tests/test_transform.py`) — a **unit test** checks one small piece of
+- **36 unit tests** (`tests/test_transform.py`, `tests/test_regressions.py`) — a **unit test** checks one small piece of
   code on its own, feeding it known input and asserting the output, with nothing else
   involved. These check the logic in isolation, with no
   database anywhere: that changing a doctor's territory creates a second version while
   changing only their *name* does not, and that every input row ends up either loaded or
   explicitly rejected — never silently vanished.
-- **20 data-quality tests** (`tests/test_data_quality.py`) check the loaded warehouse: no
+- **21 data-quality tests** (`tests/test_data_quality.py`) check the loaded warehouse: no
   prescription pointing at a missing doctor, product, territory or date; no doctor with two
   current versions; no prescription linked to a version of a doctor that was not valid on
   the day it was written.
+- **10 SQL acceptance tests** (`tests/test_analytics_regressions.py`) check therapeutic
+  markets, stable HCP identity, calendar rejection, quota rounding, and FK rollback.
 
 Tests matter here for a specific reason. A program that crashes tells you it is broken. A
 data pipeline that quietly drops 3% of its rows, or attaches the wrong territory to a year
@@ -723,11 +728,8 @@ These are the primary sources. All free, and all better than most tutorials buil
 | SQLAlchemy | [docs.sqlalchemy.org](https://docs.sqlalchemy.org/) | Only needed if you go deeper than this project does. |
 | psycopg2 | [psycopg.org/docs](https://www.psycopg.org/docs/) | Mainly worth reading for the `copy_expert` section. |
 
-A closing reminder, because it is the kind of thing that gets quoted out of context: this
-project finds that doctors who received a sales visit averaged 39.31 prescriptions per month
-against 23.71 for those who did not, with the biggest *proportional* lift in the lowest
-deciles — the percentage uplift is largest among the lowest-volume prescribers, even though
-the raw difference in prescriptions is largest among the highest. That is
-**not** a finding about medicine. The data generator deliberately plants a 14-day boost after
-each visit, so the result only shows that the pipeline and the query recover a signal known
-to be there — a correctness check on the software, and nothing more.
+A closing reminder: prescriptions and calls in this project are synthetic.
+The generator plants a 14-day post-call signal, and the report compares observed
+cohorts. That is a software validation exercise, not evidence about real medicine
+or a causal effect. Quote current values from [verification.md](verification.md),
+because generator and report fixes change the old averages.

@@ -1,0 +1,26 @@
+[
+  {
+    "project": "rxinsight",
+    "source": "how-it-works.md",
+    "pdf": "RxInsight-How-It-Works.pdf",
+    "pages": 5,
+    "words": 1741,
+    "sha256": "3bae85c0205db6129bf9da1d0d2b791b10119186e7e9af4e60292fdabc05d59d"
+  },
+  {
+    "project": "rxinsight",
+    "source": "interview-questions.md",
+    "pdf": "RxInsight-Interview-Questions.pdf",
+    "pages": 4,
+    "words": 1560,
+    "sha256": "2e4ec22e8abf1707f23627bfd54958870dbfb19331af2b3d0487a1042736e516"
+  },
+  {
+    "project": "rxinsight",
+    "source": "tools-primer.md",
+    "pdf": "RxInsight-Tools-Primer.pdf",
+    "pages": 3,
+    "words": 1140,
+    "sha256": "798aa987640000be5ffe740a5c00cb7416f51d9941393949e509bdfe25dcb5e4"
+  }
+]

@@ -97,5 +97,5 @@ For the older dependency combination, install `requirements-compat.txt` in a
 separate virtual environment and rerun `pytest tests --require-db`.
 The full refresh resets the staging and warehouse schemas, so use the project's
 isolated database. This is not an incremental loader or a production clinical
-system. The old PDF documentation snapshots are historical; the Markdown guides
-and this record describe the maintained version.
+system. The Markdown study guides and PDF editions were rebuilt together on 29 October
+2026. The documentation index links both maintained formats.
